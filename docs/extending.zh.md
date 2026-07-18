@@ -4,19 +4,19 @@
 
 ## 一、扩展点总览
 
-taichi 提供四个扩展点，按使用频率排序：
+Taichi 提供四个扩展点，按使用频率排序：
 
 | 扩展点 | 接口 | 包 | 典型场景 |
 |--------|------|-----|---------|
 | 自定义技能 | `skill.TestSkill` | `pkg/skill` | 新增测试类型（如 gRPC、Playwright E2E） |
-| 第三方插件技能 | 任意语言 + JSON-over-stdio | `pkg/skill/plugin` + `sdks/` | 用 Python/Node/Shell 等编写测试技能，无需编译进 taichi |
+| 第三方插件技能 | 任意语言 + JSON-over-stdio | `pkg/skill/plugin` + `sdks/` | 用 Python/Node/Shell 等编写测试技能，无需编译进 Taichi |
 | 自定义环境 | `env.Environment` | `pkg/env` | 新增环境类型（如 Docker、K8s port-forward）；`custom` 类型已支持任意启动命令 |
 | 自定义报告格式 | `report.Writer` | `pkg/report` | HTML 报告、Slack 通知、飞书卡片 |
 | 修复规则 | `autofix.FixRule` | `pkg/autofix` | 新增自动修复策略 |
 
-> **内置技能**：taichi 内置五个技能 —— `api` / `grpc` / `ui` / `static` / `regression`。其中 `grpc` 技能（`pkg/skill/grpc`，`kind: grpc`）仅覆盖配置驱动的冒烟检查（health / connectivity / reflection），刻意不做动态 protobuf 消息构造。若需带编译好的 protobuf 桩代码进行完整的 unary/streaming RPC 测试，请实现第三方插件技能（`kind: plugin`），用小型 Go 助手导入生成的 client 包。
+> **内置技能**：Taichi 内置五个技能 —— `api` / `grpc` / `ui` / `static` / `regression`。其中 `grpc` 技能（`pkg/skill/grpc`，`kind: grpc`）仅覆盖配置驱动的冒烟检查（health / connectivity / reflection），刻意不做动态 protobuf 消息构造。若需带编译好的 protobuf 桩代码进行完整的 unary/streaming RPC 测试，请实现第三方插件技能（`kind: plugin`），用小型 Go 助手导入生成的 client 包。
 
-> **插件进程环境**：插件进程会继承 taichi 父进程的全部环境变量（`os.Environ()`），并叠加为该插件配置的 `env` 字段。请注意敏感变量的隔离。
+> **插件进程环境**：插件进程会继承 Taichi 父进程的全部环境变量（`os.Environ()`），并叠加为该插件配置的 `env` 字段。请注意敏感变量的隔离。
 
 ## 二、自定义技能
 
@@ -33,7 +33,7 @@ import (
 
 // Skill 是 gRPC 测试技能。
 type Skill struct {
-    cfg    skill.SkillConfig
+    cfg    skill.Config
     cases  []grpcCase
     timeout time.Duration
 }
@@ -54,7 +54,7 @@ func (s *Skill) Kind() skill.Kind { return skill.KindCustom }
 func (s *Skill) Priority() skill.Priority { return skill.PriorityNormal }
 
 // Configure 解析 raw 配置。
-func (s *Skill) Configure(cfg skill.SkillConfig) error {
+func (s *Skill) Configure(cfg skill.Config) error {
     s.cfg = cfg
     s.timeout = skill.GetDuration(cfg.Raw, "timeout", skill.DefaultHTTPTimeout)
     // 解析 cases...
@@ -62,12 +62,12 @@ func (s *Skill) Configure(cfg skill.SkillConfig) error {
 }
 
 // Setup 准备资源（如建立 gRPC 连接）。
-func (s *Skill) Setup(ctx *skill.SkillContext) error {
+func (s *Skill) Setup(ctx *skill.Context) error {
     return nil
 }
 
 // Run 执行测试，结果通过 ctx.Reporter.Record 上报。
-func (s *Skill) Run(ctx *skill.SkillContext) skill.SkillResult {
+func (s *Skill) Run(ctx *skill.Context) skill.Result {
     start := time.Now()
     for _, c := range s.cases {
         caseStart := time.Now()
@@ -76,7 +76,7 @@ func (s *Skill) Run(ctx *skill.SkillContext) skill.SkillResult {
         msg := "ok"
         skill.RecordResult(ctx.Reporter, "grpc:"+c.Service, caseStart, passed, msg, nil)
     }
-    return skill.SkillResult{
+    return skill.Result{
         SkillName: s.Name(),
         Duration:  time.Since(start),
         Summary:   ctx.Reporter.Summary(),
@@ -84,25 +84,26 @@ func (s *Skill) Run(ctx *skill.SkillContext) skill.SkillResult {
 }
 
 // Teardown 释放资源。
-func (s *Skill) Teardown(ctx *skill.SkillContext) error {
+func (s *Skill) Teardown(ctx *skill.Context) error {
     return nil
 }
 ```
 
 ### 2.2 注册技能
 
-#### 方式一：编译到 taichi 二进制
+#### 方式一：编译到 Taichi 二进制
 
-在 `cmd/taichi/run.go` 的 `builtinSkills()` 中追加：
+在 `pkg/skill/builtin/builtin.go` 的 `Skills()` 中追加（`cmd/taichi` 与 `pkg/mcp` 共用的唯一来源）：
 
 ```go
-func builtinSkills() []skill.TestSkill {
+func Skills() []skill.TestSkill {
     return []skill.TestSkill{
         &api.Skill{},
+        &grpc.Skill{},
         &ui.Skill{},
         &static.Skill{},
         &regression.Skill{},
-        &grpc.Skill{},  // 新增
+        &mySkill.Skill{},  // 新增
     }
 }
 ```
@@ -111,9 +112,9 @@ func builtinSkills() []skill.TestSkill {
 
 ```go
 o := orchestrator.New()
-o.RegisterBuiltinSkills(builtinSkills())
+o.RegisterBuiltinSkills(builtin.Skills())
 // 动态注册自定义技能
-o.Registry().Register(&grpc.Skill{}, true)
+o.Registry().Register(&mySkill.Skill{}, true)
 ```
 
 #### 方式三：通过注册中心卸载
@@ -312,12 +313,12 @@ func (DBReconnectRule) Apply(ctx *autofix.FixContext) autofix.FixResult {
 实现 `skill.Hook` 接口获得全局生命周期通知：
 
 ```go
-func (s *MySkill) BeforeAll(ctx *skill.SkillContext) error {
+func (s *MySkill) BeforeAll(ctx *skill.Context) error {
     // 所有技能执行前：初始化共享资源
     return nil
 }
 
-func (s *MySkill) AfterAll(ctx *skill.SkillContext) error {
+func (s *MySkill) AfterAll(ctx *skill.Context) error {
     // 所有技能执行后：清理共享资源
     return nil
 }
@@ -338,7 +339,7 @@ func (s *MySkill) AfterAll(ctx *skill.SkillContext) error {
 
 ## 七、跨项目复用
 
-taichi 作为独立 Go module，可被任意项目引用：
+Taichi 作为独立 Go module，可被任意项目引用：
 
 ### 7.1 作为库引用
 
@@ -365,7 +366,7 @@ taichi run -c my-project-taichi.yaml
 
 ### 7.3 tickraft 集成示例
 
-tickraft 项目通过如下方式集成 taichi：
+tickraft 项目通过如下方式集成 Taichi：
 - tickraft 的测试 runner 改为 import `github.com/tickraft/taichi/pkg/{framework,autofix}`
 - `tickraft/go.mod` 通过 `replace` 指令引用本地 taichi
 
